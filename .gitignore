@@ -2,3 +2,11 @@
 __pycache__/
 *.pyc
 output/
+test_output/
+.idea/
+.DS_Store
+.claude/
+*.egg-info/
+dist/
+build/
+.pytest_cache/

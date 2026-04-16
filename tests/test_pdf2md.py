@@ -8,8 +8,8 @@ import pytest
 from PIL import Image
 
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "parse_pdf.py"
-SPEC = importlib.util.spec_from_file_location("parse_pdf", MODULE_PATH)
+MODULE_PATH = Path(__file__).resolve().parents[1] / "pdf2md.py"
+SPEC = importlib.util.spec_from_file_location("pdf2md", MODULE_PATH)
 parse_pdf = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(parse_pdf)

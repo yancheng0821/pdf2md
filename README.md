@@ -24,10 +24,10 @@ pip install pymupdf openai python-dotenv
 cp .env.example .env  # 编辑填入你的 key
 
 # 转换PDF
-python parse_pdf.py 报告.pdf
+python pdf2md.py 报告.pdf
 
 # 处理整个文件夹
-python parse_pdf.py ~/reports/ -o ./output
+python pdf2md.py ~/reports/ -o ./output
 ```
 
 ## 成本模型
@@ -40,10 +40,10 @@ python parse_pdf.py ~/reports/ -o ./output
 
 ```bash
 # 预估成本
-python parse_pdf.py ~/reports/ --dry-run
+python pdf2md.py ~/reports/ --dry-run
 
 # 全零API成本（仅限纯文本PDF）
-python parse_pdf.py ~/reports/ --no-cleanup
+python pdf2md.py ~/reports/ --no-cleanup
 ```
 
 ## 用法详解
@@ -51,7 +51,7 @@ python parse_pdf.py ~/reports/ --no-cleanup
 ### 基本参数
 
 ```bash
-python parse_pdf.py <输入路径> [选项]
+python pdf2md.py <输入路径> [选项]
 
 选项：
   -o, --output          输出目录（默认：输入路径同级的 output/）
@@ -70,17 +70,17 @@ python parse_pdf.py <输入路径> [选项]
 
 ```bash
 # 只跑提取（阶段1）
-python parse_pdf.py ~/reports/ --stage extract
+python pdf2md.py ~/reports/ --stage extract
 
 # 只跑合并（阶段2，复用已有的 .pages.md）
-python parse_pdf.py ~/reports/ --stage merge
+python pdf2md.py ~/reports/ --stage merge
 ```
 
 ### 推荐搭配
 
 ```bash
 # OCR 用 5.4（最准），清理用 5.4-mini（省钱）
-python parse_pdf.py report.pdf -v 5.4 -p openai
+python pdf2md.py report.pdf -v 5.4 -p openai
 ```
 
 ## 输出文件
