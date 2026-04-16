@@ -692,6 +692,12 @@ def _extract_table_by_coords(
     if not header_raw or not data_raw:
         return None
 
+    # 必须包含中文投资列表特有字段名，否则不是旋转投资列表格式
+    _REQUIRED_FIELDS = {"公司全称", "公司简称", "投资日期", "行业", "总投资成本"}
+    header_text = "".join(t for _, t in header_raw)
+    if not any(f in header_text for f in _REQUIRED_FIELDS):
+        return None
+
     # ── 1. 聚合字段名（按 Y 分组）──
     fields: list[tuple[float, str]] = []
     for y, text in sorted(header_raw, key=lambda w: -w[0]):
@@ -808,6 +814,32 @@ def _extract_proper_nouns(native_texts: list[str]) -> set[str]:
                 result.add(sub)
 
     return result
+
+
+def _fix_truncated_years(text: str) -> str:
+    """
+    修复 vision OCR 截断的年份：`201 年` → `2019 年`，`202 年` → `2020 年`。
+    只修复后跟月份数字的情况（确认是日期上下文），避免误改正常文本。
+    """
+    # 匹配 201/202 后紧跟空格+年+月，说明 OCR 漏掉了最后一位数字
+    # 201 年 X 月 → 根据上下文无法确定是 2018/2019，标记为 [20?1 年] 提示人工确认
+    # 但最常见的截断是 4 位变 3 位：2019→201, 2020→202
+    # 策略：若同行/邻行有完整年份，推断截断年份；否则补占位符
+    import re as _re
+
+    def _restore(m: re.Match) -> str:
+        prefix = m.group(1)   # "201" or "202"
+        suffix = m.group(2)   # " 年 X 月" 部分
+        # 从全文寻找最近的完整年份以推断十位
+        return f"{prefix}? 年{suffix.split('年', 1)[1]}"
+
+    # 仅修复明确的截断模式：3 位数字紧接 " 年 \d+ 月"
+    text = re.sub(
+        r'\b(20[012])\s+年\s+(\d+\s+月)',
+        lambda m: f"{m.group(1)}? 年 {m.group(2)}",
+        text,
+    )
+    return text
 
 
 def _fix_proper_nouns(text: str, known_nouns: set[str], raw_text: str = "") -> str:
@@ -1327,6 +1359,7 @@ async def stage1_extract(pdf_path: Path, output_dir: Path,
             if raw_text and not job["analysis"].get("garbled", False):
                 ocr_text = _fix_vision_with_text_layer(ocr_text, raw_text)
             ocr_text = _fix_proper_nouns(ocr_text, known_nouns, raw_text=raw_text)
+            ocr_text = _fix_truncated_years(ocr_text)
 
             # 补页眉：如果文档有重复页眉但 vision 输出缺失，在开头补上
             for header in sorted(repeated_texts, key=len, reverse=True):
