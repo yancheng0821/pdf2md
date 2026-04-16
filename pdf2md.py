@@ -124,8 +124,18 @@ def _reset_token_usage() -> None:
 def _add_token_usage(usage: Any) -> None:
     if usage is None:
         return
-    _token_usage["prompt"] += getattr(usage, "prompt_tokens", 0) or 0
-    _token_usage["completion"] += getattr(usage, "completion_tokens", 0) or 0
+    # OpenAI: prompt_tokens / completion_tokens
+    # Anthropic: input_tokens / output_tokens
+    _token_usage["prompt"] += (
+        getattr(usage, "prompt_tokens", None)
+        or getattr(usage, "input_tokens", None)
+        or 0
+    )
+    _token_usage["completion"] += (
+        getattr(usage, "completion_tokens", None)
+        or getattr(usage, "output_tokens", None)
+        or 0
+    )
     _token_usage["calls"] += 1
 
 
