@@ -385,7 +385,7 @@ async def test_stage1_extract_falls_back_to_vision_when_native_table_is_invalid(
     )
     monkeypatch.setattr(parse_pdf, "get_async_client", lambda _provider: (object(), "fake-model"))
 
-    async def fake_convert(client, model, page_number, image_bytes, semaphore, progress):
+    async def fake_convert(client, model, page_number, image_bytes, semaphore, progress, use_high_detail=False):
         del client, model, image_bytes, semaphore
         progress["done"] += 1
         return page_number, "| 序号 | 分配时间 |\n| --- | --- |\n| 1 | 2021.09 |"
@@ -429,7 +429,7 @@ async def test_stage1_extract_vision_output_has_no_image_ref(monkeypatch, tmp_pa
     })
     monkeypatch.setattr(parse_pdf, "get_async_client", lambda _provider: (object(), "fake-model"))
 
-    async def fake_convert(client, model, page_number, image_bytes, semaphore, progress):
+    async def fake_convert(client, model, page_number, image_bytes, semaphore, progress, use_high_detail=False):
         del client, model, image_bytes, semaphore
         progress["done"] += 1
         return page_number, "识别正文"

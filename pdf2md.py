@@ -27,6 +27,7 @@ from typing import Any
 
 import fitz  # pymupdf
 from dotenv import load_dotenv
+from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 
 
@@ -80,6 +81,25 @@ PROVIDERS = {
         "base_url": os.getenv("OPENAI_54_NANO_BASE_URL"),
         "model": os.getenv("OPENAI_54_NANO_MODEL"),
     },
+    # ── Claude (Anthropic) ──
+    "claude-sonnet": {
+        "api_key": os.getenv("ANTHROPIC_API_KEY"),
+        "base_url": None,  # 使用 Anthropic 原生 SDK，不需要 base_url
+        "model": os.getenv("CLAUDE_SONNET_MODEL", "claude-sonnet-4-6"),
+        "provider_type": "anthropic",
+    },
+    "claude-haiku": {
+        "api_key": os.getenv("ANTHROPIC_API_KEY"),
+        "base_url": None,
+        "model": os.getenv("CLAUDE_HAIKU_MODEL", "claude-haiku-4-5-20251001"),
+        "provider_type": "anthropic",
+    },
+    "claude-opus": {
+        "api_key": os.getenv("ANTHROPIC_API_KEY"),
+        "base_url": None,
+        "model": os.getenv("CLAUDE_OPUS_MODEL", "claude-opus-4-6"),
+        "provider_type": "anthropic",
+    },
 }
 
 TEXT_THRESHOLD = 30
@@ -125,6 +145,10 @@ TOKEN_PRICES = {
     "gpt-5.4": {"input": 2.50, "output": 10.00},
     "gpt-5.4-mini": {"input": 0.40, "output": 1.60},
     "gpt-5.4-nano": {"input": 0.10, "output": 0.40},
+    # Claude (Anthropic) — per-million-token pricing
+    "claude-sonnet-4-6": {"input": 3.00, "output": 15.00},
+    "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.00},
+    "claude-opus-4-6": {"input": 15.00, "output": 75.00},
 }
 
 KNOWN_GARBLE_CHARS = set("睡睢督睤睥睦睧睨睩睪睫睬睭睮睯")
@@ -153,10 +177,17 @@ IMAGE_OCR_PROMPT = """识别这张图片中的内容，转为 Markdown 格式输
 """
 
 
-def get_async_client(provider: str) -> tuple[AsyncOpenAI, str]:
+def get_async_client(provider: str) -> tuple[AsyncOpenAI | AsyncAnthropic, str]:
     cfg = PROVIDERS[provider]
-    client = AsyncOpenAI(api_key=cfg["api_key"], base_url=cfg["base_url"])
+    if cfg.get("provider_type") == "anthropic":
+        client = AsyncAnthropic(api_key=cfg["api_key"])
+    else:
+        client = AsyncOpenAI(api_key=cfg["api_key"], base_url=cfg["base_url"])
     return client, cfg["model"]
+
+
+def _is_anthropic_client(client: Any) -> bool:
+    return isinstance(client, AsyncAnthropic)
 
 
 # ── 文本质量检测 ──────────────────────────────────────
@@ -432,22 +463,51 @@ def classify_pages(pdf_path: str) -> tuple[dict[int, str], dict[int, str], int]:
 
 # ── LLM 调用 ─────────────────────────────────────────
 
-async def call_llm(client: AsyncOpenAI, model: str, system: str,
+def _openai_to_anthropic_content(content_parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """将 OpenAI 格式的 content_parts 转换为 Anthropic 格式。"""
+    result = []
+    for part in content_parts:
+        if part.get("type") == "text":
+            result.append({"type": "text", "text": part["text"]})
+        elif part.get("type") == "image_url":
+            url = part["image_url"]["url"]
+            # data:image/png;base64,<data>
+            if url.startswith("data:"):
+                media_type, b64data = url.split(";base64,", 1)
+                media_type = media_type.replace("data:", "")
+                result.append({
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": media_type, "data": b64data},
+                })
+    return result
+
+
+async def call_llm(client: AsyncOpenAI | AsyncAnthropic, model: str, system: str,
                    content_parts: list[dict[str, Any]], retry: int = 0) -> str:
-    use_new_param = any(model.startswith(prefix) for prefix in ("gpt-5", "o1", "o3", "o4"))
-    token_param = {"max_completion_tokens": 4096} if use_new_param else {"max_tokens": 4096}
     try:
-        resp = await client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": content_parts},
-            ],
-            temperature=0.1,
-            **token_param,
-        )
-        _add_token_usage(resp.usage)
-        return resp.choices[0].message.content or ""
+        if _is_anthropic_client(client):
+            resp = await client.messages.create(
+                model=model,
+                max_tokens=4096,
+                system=system,
+                messages=[{"role": "user", "content": _openai_to_anthropic_content(content_parts)}],
+            )
+            _add_token_usage(resp.usage)
+            return resp.content[0].text if resp.content else ""
+        else:
+            use_new_param = any(model.startswith(prefix) for prefix in ("gpt-5", "o1", "o3", "o4"))
+            token_param = {"max_completion_tokens": 4096} if use_new_param else {"max_tokens": 4096}
+            resp = await client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": content_parts},
+                ],
+                temperature=0.1,
+                **token_param,
+            )
+            _add_token_usage(resp.usage)
+            return resp.choices[0].message.content or ""
     except Exception:
         if retry < MAX_RETRIES:
             await asyncio.sleep(2 ** retry)
@@ -458,15 +518,18 @@ async def call_llm(client: AsyncOpenAI, model: str, system: str,
 PAGE_VISION_TIMEOUT = 150  # 单页 vision OCR 超时秒数
 
 
-async def convert_single_page(client: AsyncOpenAI, model: str, page_number: int,
-                              image_bytes: bytes, semaphore: asyncio.Semaphore,
-                              progress: dict[str, int]) -> tuple[int, str]:
+async def convert_single_page(client: AsyncOpenAI | AsyncAnthropic, model: str,
+                              page_number: int, image_bytes: bytes,
+                              semaphore: asyncio.Semaphore, progress: dict[str, int],
+                              use_high_detail: bool = False) -> tuple[int, str]:
     async with semaphore:
+        # Anthropic 不支持 detail 参数，OpenAI 根据页面复杂度选择
+        detail = "high" if (use_high_detail and not _is_anthropic_client(client)) else "auto"
         content = [
             {"type": "text", "text": f"第{page_number}页"},
             {"type": "image_url", "image_url": {
                 "url": f"data:image/png;base64,{base64.b64encode(image_bytes).decode()}",
-                "detail": "auto",
+                "detail": detail,
             }},
         ]
         try:
@@ -1297,7 +1360,10 @@ async def stage1_extract(pdf_path: Path, output_dir: Path,
 
         full_image_name = f"page-{page_number:03d}-full.png"
         full_image_path = paths["assets_dir"] / full_image_name
-        full_image_bytes = _render_page_png(page)
+        # 无文字层（扫描件）或乱码页用更高 DPI，确保 OCR 质量
+        is_scan_page = not analysis.get("native_candidate") or analysis.get("garbled", False)
+        render_dpi = 200 if is_scan_page else IMAGE_DPI
+        full_image_bytes = _render_page_png(page, dpi=render_dpi)
         full_image_path.write_bytes(full_image_bytes)
         vision_jobs.append({
             "page_number": page_number,
@@ -1306,6 +1372,7 @@ async def stage1_extract(pdf_path: Path, output_dir: Path,
             "page_record": page_record,
             "image_bytes": full_image_bytes,
             "image_ref": f"assets/{full_image_name}",
+            "high_detail": is_scan_page,  # 扫描页同时启用 detail:high
         })
         manifest["pages"].append(page_record)
 
@@ -1325,6 +1392,7 @@ async def stage1_extract(pdf_path: Path, output_dir: Path,
                     job["image_bytes"],
                     sem,
                     progress,
+                    use_high_detail=job.get("high_detail", False),
                 )
                 for job in vision_jobs
             ],
