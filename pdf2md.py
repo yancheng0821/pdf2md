@@ -1370,11 +1370,7 @@ async def stage1_extract(pdf_path: Path, output_dir: Path,
 
         full_image_name = f"page-{page_number:03d}-full.png"
         full_image_path = paths["assets_dir"] / full_image_name
-        # 纯扫描件（无文字层）用更高 DPI + detail:high 提升 OCR 质量
-        # 字体乱码页保持 150 DPI + detail:auto：更高细节反而导致模型对截断字符产生幻觉
-        is_pure_scan = not analysis.get("native_candidate") and not analysis.get("garbled", False)
-        render_dpi = 200 if is_pure_scan else IMAGE_DPI
-        full_image_bytes = _render_page_png(page, dpi=render_dpi)
+        full_image_bytes = _render_page_png(page, dpi=IMAGE_DPI)
         full_image_path.write_bytes(full_image_bytes)
         vision_jobs.append({
             "page_number": page_number,
@@ -1383,7 +1379,7 @@ async def stage1_extract(pdf_path: Path, output_dir: Path,
             "page_record": page_record,
             "image_bytes": full_image_bytes,
             "image_ref": f"assets/{full_image_name}",
-            "high_detail": is_pure_scan,  # 仅纯扫描页启用 detail:high
+            "high_detail": False,
         })
         manifest["pages"].append(page_record)
 
