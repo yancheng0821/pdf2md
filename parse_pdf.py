@@ -455,7 +455,7 @@ async def call_llm(client: AsyncOpenAI, model: str, system: str,
         raise
 
 
-PAGE_VISION_TIMEOUT = 90  # 单页 vision OCR 超时秒数
+PAGE_VISION_TIMEOUT = 150  # 单页 vision OCR 超时秒数
 
 
 async def convert_single_page(client: AsyncOpenAI, model: str, page_number: int,
@@ -1611,6 +1611,9 @@ async def process_pdf(pdf_path: Path, output_dir: Path, provider: str,
                 print(f"  [失败] {exc}")
                 return False
             print(f"  → {out.name}")
+            # 在 output 根目录生成同名 .md，方便与 PDF 对照
+            named_copy = output_dir / (pdf_path.stem + ".md")
+            shutil.copy2(out, named_copy)
 
         elapsed = time.time() - t0
         v_model = PROVIDERS.get(vision_provider or provider, {}).get("model", "")
