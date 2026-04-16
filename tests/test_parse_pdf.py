@@ -126,10 +126,11 @@ def test_strip_page_markers():
 # ── 质量校验 ─────────────────────────────────────────
 
 def test_validate_conversion_detects_missing_numbers():
-    source = "<!-- page:1 method:text -->\n金额 1,234,567.89 和 9,876,543.21 以及 100,000.00 和 50,000.00"
+    # validate_conversion 现在只检查内容长度，不做数字序列比对
+    source = "<!-- page:1 method:text -->\n" + "金额 1,234,567.89 " * 50
     result = "金额已省略"
     warnings = parse_pdf.validate_conversion(source, result)
-    assert any("数字序列" in w for w in warnings)
+    assert any("内容丢失" in w for w in warnings)
 
 
 def test_validate_conversion_detects_short_output():
@@ -147,10 +148,11 @@ def test_validate_conversion_no_warnings_when_good():
 
 
 def test_validate_conversion_detects_malformed_years():
-    source = "<!-- page:1 method:vision -->\n2019 年 2020 年 2021 年"
-    result = "201 年 202 年 2021 年"
+    # validate_conversion 现在只检查内容长度和乱码字符，年份检测已移至 _validate_page_output
+    source = "<!-- page:1 method:vision -->\n" + "2019 年 2020 年 2021 年 " * 30
+    result = "201 年"
     warnings = parse_pdf.validate_conversion(source, result)
-    assert any("年份" in w for w in warnings)
+    assert any("内容丢失" in w for w in warnings)
 
 
 def test_validate_conversion_normalizes_line_broken_years():
@@ -215,6 +217,12 @@ def test_validate_page_output_allows_ocr_to_omit_header_year_from_raw_text():
     assert not any("年份" in w for w in warnings)
 
 
+def test_fix_proper_nouns_corrects_inserted_noise():
+    text = "上海天天爱动医疗科技股份有限公司"
+    fixed = parse_pdf._fix_proper_nouns(text, {"上海博动医疗科技股份有限公司"})
+    assert fixed == "上海博动医疗科技股份有限公司"
+
+
 # ── 阶段2合并 ────────────────────────────────────────
 
 @pytest.mark.asyncio
@@ -241,6 +249,34 @@ async def test_stage2_merge_no_cleanup(tmp_path):
     assert "<!-- page:2 -->" in result
     assert "# 标题" in result
     assert "正文内容" in result
+
+
+@pytest.mark.asyncio
+async def test_stage2_merge_completes_brand_header_from_leading_lines(tmp_path):
+    doc_dir = tmp_path / "report"
+    pages_dir = doc_dir / "pages"
+    pages_dir.mkdir(parents=True)
+    (pages_dir / "001.md").write_text(
+        "<!-- page:1 -->\n博行资本\nINSIGHT CAPITAL\n\n武汉博行问道创业投资合伙企业（有限合伙）\n2024 年度报告",
+        encoding="utf-8",
+    )
+    (pages_dir / "002.md").write_text(
+        "<!-- page:2 -->\n武汉博行问道创业投资合伙企业（有限合伙）\n2024 年度报告\n\n正文内容",
+        encoding="utf-8",
+    )
+    (doc_dir / "manifest.json").write_text(json.dumps({
+        "source_pdf": "report.pdf",
+        "success": True,
+        "pages": [
+            {"page_number": 1, "validated": True, "page_file": "pages/001.md"},
+            {"page_number": 2, "validated": True, "page_file": "pages/002.md"},
+        ],
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    out = await parse_pdf.stage2_merge(doc_dir)
+    result = out.read_text(encoding="utf-8")
+    page_two = result.split("<!-- page:2 -->", 1)[1]
+    assert page_two.lstrip().startswith("博行资本\nINSIGHT CAPITAL\n\n武汉博行问道创业投资合伙企业（有限合伙）")
 
 
 @pytest.mark.asyncio
@@ -347,7 +383,6 @@ async def test_stage1_extract_falls_back_to_vision_when_native_table_is_invalid(
             [],  # no pending images
         ),
     )
-    monkeypatch.setattr(parse_pdf, "_extract_local_ocr_markdown", lambda *args, **kwargs: None)
     monkeypatch.setattr(parse_pdf, "get_async_client", lambda _provider: (object(), "fake-model"))
 
     async def fake_convert(client, model, page_number, image_bytes, semaphore, progress):
@@ -369,6 +404,50 @@ async def test_stage1_extract_falls_back_to_vision_when_native_table_is_invalid(
     manifest = json.loads((doc_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["success"] is True
     assert manifest["pages"][0]["method"] == "vision"
+
+
+@pytest.mark.asyncio
+async def test_stage1_extract_vision_output_has_no_image_ref(monkeypatch, tmp_path):
+    """vision 页输出不应包含图片引用，内容已被 OCR 转为文字"""
+    pdf_path = tmp_path / "sample.pdf"
+    doc = fitz.open()
+    doc.new_page()
+    doc.save(pdf_path)
+    doc.close()
+
+    monkeypatch.setattr(parse_pdf, "_analyze_page", lambda _page, repeated_texts=None: {
+        "has_images": False,
+        "has_tables": False,
+        "raw_text": "",
+        "body_text": "",
+        "native_candidate": False,
+        "raw_text_length": 0,
+        "table_count": 0,
+        "image_blocks": 0,
+        "has_native_text": False,
+        "garbled": False,
+    })
+    monkeypatch.setattr(parse_pdf, "get_async_client", lambda _provider: (object(), "fake-model"))
+
+    async def fake_convert(client, model, page_number, image_bytes, semaphore, progress):
+        del client, model, image_bytes, semaphore
+        progress["done"] += 1
+        return page_number, "识别正文"
+
+    monkeypatch.setattr(parse_pdf, "convert_single_page", fake_convert)
+
+    doc_dir = await parse_pdf.stage1_extract(
+        pdf_path=pdf_path,
+        output_dir=tmp_path / "out",
+        provider="openai",
+        vision_provider=None,
+        ocr_concurrency=1,
+    )
+
+    assert doc_dir is not None
+    page_md = (doc_dir / "pages" / "001.md").read_text(encoding="utf-8")
+    assert "![" not in page_md
+    assert "识别正文" in page_md
 
 
 @pytest.mark.asyncio
