@@ -313,6 +313,36 @@ def _infer_heading_level(span_size: float, body_size: float) -> int:
     return 0
 
 
+def _is_table_cell_order_reliable(table, page: fitz.Page) -> bool:
+    """
+    检测 find_tables 提取的单元格文本顺序是否可信。
+    原理：若单元格内某行文本在原始文本流中出现的位置比前一行更早，
+    说明 find_tables 把 span 顺序搞乱了（倒序/交叉），返回 False。
+    """
+    try:
+        raw_text = page.get_text("text")
+        data = table.extract()
+    except Exception:
+        return True  # 无法判断时不干预
+
+    for row in (data or []):
+        for cell in (row or []):
+            if not cell:
+                continue
+            lines = [ln.strip() for ln in str(cell).split("\n") if ln.strip()]
+            if len(lines) < 2:
+                continue
+            prev_pos = raw_text.find(lines[0])
+            for line in lines[1:]:
+                cur_pos = raw_text.find(line)
+                # 找不到、或者后一行在原文中出现在前一行之前 → 顺序错乱
+                if cur_pos != -1 and prev_pos != -1 and cur_pos < prev_pos:
+                    return False
+                if cur_pos != -1:
+                    prev_pos = cur_pos
+    return True
+
+
 def _extract_table_fragments(page: fitz.Page) -> list[tuple[float, float, str]]:
     try:
         table_finder = page.find_tables()
@@ -321,6 +351,8 @@ def _extract_table_fragments(page: fitz.Page) -> list[tuple[float, float, str]]:
 
     fragments: list[tuple[float, float, str]] = []
     for table in table_finder.tables:
+        if not _is_table_cell_order_reliable(table, page):
+            continue  # 单元格顺序错乱，跳过，由 native text 流接管
         markup = _table_to_markup(table)
         if not markup:
             continue
