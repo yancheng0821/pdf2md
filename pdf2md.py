@@ -791,7 +791,7 @@ def _extract_table_by_coords(
         return None
 
     # 分离字段名词（左列）和数据词
-    header_raw = [(w[1], w[4]) for w in words if header_x_min <= w[0] < header_x_max]
+    header_raw = [(w[0], w[1], w[4]) for w in words if header_x_min <= w[0] < header_x_max]
     data_raw   = [(w[0], w[1], w[4]) for w in words if w[0] >= header_x_max]
 
     if not header_raw or not data_raw:
@@ -799,17 +799,27 @@ def _extract_table_by_coords(
 
     # 必须包含中文投资列表特有字段名，否则不是旋转投资列表格式
     _REQUIRED_FIELDS = {"公司全称", "公司简称", "投资日期", "行业", "总投资成本"}
-    header_text = "".join(t for _, t in header_raw)
+    header_text = "".join(t for _, _, t in header_raw)
     if not any(f in header_text for f in _REQUIRED_FIELDS):
         return None
 
     # ── 1. 聚合字段名（按 Y 分组）──
-    fields: list[tuple[float, str]] = []
-    for y, text in sorted(header_raw, key=lambda w: -w[0]):
-        if not fields or abs(y - fields[-1][0]) > y_tol:
-            fields.append((y, text))
+    # 先按 y 降序（页面旋转 90°，阅读方向是 y 从大到小）把词分到各字段；
+    # 字段内部字符可能跨行（如"目前持股比 / 例"），必须按 x 升序拼接，
+    # 否则会得到 "例目前持股比" 这类顺序反掉的字段名。
+    field_groups: list[list[tuple[float, float, str]]] = []
+    for x, y, text in sorted(header_raw, key=lambda w: -w[1]):
+        if not field_groups or abs(y - field_groups[-1][-1][1]) > y_tol:
+            field_groups.append([(x, y, text)])
         else:
-            fields[-1] = (fields[-1][0], fields[-1][1] + text)
+            field_groups[-1].append((x, y, text))
+    fields: list[tuple[float, str]] = [
+        (
+            max(w[1] for w in group),
+            "".join(t for _, _, t in sorted(group, key=lambda w: w[0])),
+        )
+        for group in field_groups
+    ]
 
     if len(fields) < 3:
         return None
