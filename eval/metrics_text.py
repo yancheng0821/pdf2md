@@ -31,7 +31,15 @@ def char_metrics(baseline: str, md: str) -> dict[str, Any]:
     precision = lcs / len(md)
     recall = lcs / len(baseline)
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-    return {"precision": precision, "recall": recall, "f1": f1, "skipped": False}
+    return {
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "skipped": False,
+        "_tp": lcs,
+        "_fp": len(md) - lcs,
+        "_fn": len(baseline) - lcs,
+    }
 
 
 def edit_distance(a: str, b: str) -> int:
@@ -76,4 +84,12 @@ def word_metrics(baseline: str, md: str) -> dict[str, Any]:
     precision = lcs / len(m_tokens)
     recall = lcs / len(b_tokens)
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-    return {"precision": precision, "recall": recall, "f1": f1, "skipped": False}
+    return {
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "skipped": False,
+        "_tp": lcs,
+        "_fp": len(m_tokens) - lcs,
+        "_fn": len(b_tokens) - lcs,
+    }
