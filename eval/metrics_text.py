@@ -61,3 +61,19 @@ def edit_ratio(baseline: str, md: str) -> float:
     if not baseline:
         return 0.0
     return edit_distance(baseline, md) / len(baseline)
+
+
+def word_metrics(baseline: str, md: str) -> dict[str, Any]:
+    """英文按空白切词后跑 LCS。中文不建议用（分词会引入额外噪音）。"""
+    b_tokens = baseline.split()
+    m_tokens = md.split()
+    if not b_tokens and not m_tokens:
+        return {"skipped": True}
+    if not m_tokens or not b_tokens:
+        return {"precision": 0.0, "recall": 0.0, "f1": 0.0, "skipped": False}
+    matcher = SequenceMatcher(a=b_tokens, b=m_tokens, autojunk=False)
+    lcs = sum(block.size for block in matcher.get_matching_blocks())
+    precision = lcs / len(m_tokens)
+    recall = lcs / len(b_tokens)
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+    return {"precision": precision, "recall": recall, "f1": f1, "skipped": False}
