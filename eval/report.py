@@ -236,3 +236,89 @@ def write_summary(results: list[dict[str, Any]], output_dir: Path) -> None:
             agg = r["agg"]
             row_values = [r["name"]] + [_fmt(agg.get(c)) for c in SUMMARY_COLUMNS[1:]]
             f.write("| " + " | ".join(row_values) + " |\n")
+
+
+BAD_CASE_TOP_N = 3
+DIFF_MAX_LINES = 40
+
+
+def _page_sort_key(p: dict[str, Any]) -> float:
+    scores = []
+    if not p["text"].get("skipped"):
+        f1 = p["text"].get("f1")
+        if f1 is not None:
+            scores.append(f1)
+    if not p["table"].get("skipped"):
+        f1 = p["table"].get("f1")
+        if f1 is not None:
+            scores.append(f1)
+    return min(scores) if scores else 2.0
+
+
+def _text_diff(baseline: str, md: str) -> str:
+    diff = list(unified_diff(
+        baseline.splitlines() or [""],
+        md.splitlines() or [""],
+        fromfile="baseline", tofile="md", lineterm="",
+    ))
+    if len(diff) > DIFF_MAX_LINES:
+        diff = diff[:DIFF_MAX_LINES] + [f"... ({len(diff) - DIFF_MAX_LINES} more lines truncated)"]
+    return "\n".join(diff) if diff else "(no diff)"
+
+
+def _table_diff_md(baseline_tables: list, md_tables: list) -> str:
+    if not baseline_tables and not md_tables:
+        return "(no tables)"
+    base_ms: Counter = Counter()
+    md_ms: Counter = Counter()
+    for t in baseline_tables:
+        base_ms.update(cell_multiset(t))
+    for t in md_tables:
+        md_ms.update(cell_multiset(t))
+    all_cells = sorted(set(base_ms.keys()) | set(md_ms.keys()))
+    lines = ["| cell | in_baseline | in_md | status |", "|---|---|---|---|"]
+    for cell in all_cells[:60]:
+        in_b = base_ms.get(cell, 0)
+        in_m = md_ms.get(cell, 0)
+        if in_b and in_m:
+            st = "match"
+        elif in_b and not in_m:
+            st = "missing_in_md"
+        else:
+            st = "extra_in_md"
+        lines.append(f"| `{cell[:40]}` | {in_b} | {in_m} | {st} |")
+    if len(all_cells) > 60:
+        lines.append(f"_... {len(all_cells) - 60} more cells truncated_")
+    return "\n".join(lines)
+
+
+def write_bad_cases(result: dict[str, Any], output_dir: Path) -> None:
+    """挑 TOP-N 最差 ok 页，写 bad_cases.md"""
+    sub = Path(output_dir) / result["name"]
+    sub.mkdir(parents=True, exist_ok=True)
+
+    ok_pages = [p for p in result["pages"] if p["status"] == "ok"]
+    ok_pages.sort(key=_page_sort_key)
+    top = ok_pages[:BAD_CASE_TOP_N]
+
+    out = [f"# Bad cases — {result['name']}\n"]
+    if not top:
+        out.append("无可用 bad case（所有页被跳过或全绿）。\n")
+    else:
+        for p in top:
+            text_f1 = p["text"].get("f1")
+            table_f1 = p["table"].get("f1")
+            out.append(
+                f"## Page {p['page']} — "
+                f"text_F1={_fmt(text_f1) or 'skip'}  "
+                f"table_F1={_fmt(table_f1) or 'skip'}  "
+                f"method={p.get('md_method', '')}\n"
+            )
+            out.append("### Text diff (baseline → md)\n```diff\n")
+            out.append(_text_diff(p.get("_baseline_text", ""), p.get("_md_text", "")))
+            out.append("\n```\n")
+            out.append("### Table diff\n")
+            out.append(_table_diff_md(p.get("_baseline_tables", []), p.get("_md_tables", [])))
+            out.append("\n")
+
+    (sub / "bad_cases.md").write_text("\n".join(out), encoding="utf-8")
