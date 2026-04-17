@@ -1,4 +1,4 @@
-"""从源 PDF 抽取基线数据（文本 + 表格）。"""
+"""从源 PDF 抽取基线文本（PyMuPDF），供召回率计算用。"""
 
 from __future__ import annotations
 
@@ -6,17 +6,15 @@ import logging
 from pathlib import Path
 
 import fitz  # PyMuPDF
-import pdfplumber
 
 from eval.normalize import normalize_text
 
 logger = logging.getLogger(__name__)
 
-SCANNED_THRESHOLD = 20
-
 
 def extract_baseline_text(pdf_path: Path) -> list[str]:
-    """返回每页归一化后的纯文本，长度 == PDF 页数。"""
+    """返回每页归一化后的纯文本。基线不完美（CID 乱码/扫描件空文本）是已知的，
+    和 MD 做 len 比即可——这是 README 用的"召回比"口径。"""
     if not Path(pdf_path).exists():
         raise FileNotFoundError(f"PDF not found: {pdf_path}")
     out: list[str] = []
@@ -28,36 +26,4 @@ def extract_baseline_text(pdf_path: Path) -> list[str]:
                 logger.warning("PyMuPDF get_text failed on page %d: %s", page.number + 1, e)
                 raw = ""
             out.append(normalize_text(raw))
-    return out
-
-
-def is_scanned_page(normalized_text: str) -> bool:
-    """归一化后文本长度 < 阈值 → 扫描页（基线不可信）。"""
-    return len(normalized_text.strip()) < SCANNED_THRESHOLD
-
-
-def extract_baseline_tables(pdf_path: Path) -> list[list[list[list[str]]]]:
-    """返回每页的表格列表。
-
-    外层：页 → 中层：页内的表 → 内层：行 → 单元格。
-    某页 pdfplumber 抛异常时，该页对应 `[]`（空 list）并记 warning。
-    """
-    if not Path(pdf_path).exists():
-        raise FileNotFoundError(f"PDF not found: {pdf_path}")
-    out: list[list[list[list[str]]]] = []
-    with pdfplumber.open(pdf_path) as pdf:
-        for i, page in enumerate(pdf.pages):
-            try:
-                raw_tables = page.extract_tables() or []
-            except Exception as e:  # noqa: BLE001
-                logger.warning("pdfplumber extract_tables failed on page %d: %s", i + 1, e)
-                raw_tables = []
-            page_tables: list[list[list[str]]] = []
-            for t in raw_tables:
-                normalized = [
-                    [("" if cell is None else str(cell).strip()) for cell in row]
-                    for row in t
-                ]
-                page_tables.append(normalized)
-            out.append(page_tables)
     return out

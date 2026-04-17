@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from eval.baseline import extract_baseline_text, is_scanned_page
+from eval.baseline import extract_baseline_text
 
 FIXTURE = Path(__file__).parent / "fixtures" / "tiny.pdf"
 
@@ -18,16 +18,6 @@ def test_extract_text_applies_normalization():
     texts = extract_baseline_text(FIXTURE)
     assert texts[0] == texts[0].lower()
     assert "  " not in texts[0]
-
-
-def test_is_scanned_page_detects_empty():
-    assert is_scanned_page("") is True
-    assert is_scanned_page("   ") is True
-    assert is_scanned_page("short") is True
-
-
-def test_is_scanned_page_on_long_text():
-    assert is_scanned_page("a" * 25) is False
 
 
 def test_extract_text_missing_file_raises():

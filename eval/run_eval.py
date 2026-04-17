@@ -1,173 +1,228 @@
-"""pdf2md 转换质量评估入口。
+"""pdf2md 召回率 + 字段级准确率评估。
+
+两套指标：
+  - 召回率：len(strip_markdown(MD)) / len(PyMuPDF 基线)
+  - 准确率：每份 PDF 按 golden.yaml 里的字段查 MD 是否包含该值，命中率
 
 用法：
-    python -m eval.run_eval [--config eval/config.yaml]
+  python -m eval.run_eval [--config eval/config.yaml] [--golden eval/golden.yaml]
 
-从 config.yaml 读取 5 份 PDF，逐份跑评估，产物写到 output_dir。
+准确率的 golden.yaml 是手工标注的。没标就只跑召回率。
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import sys
-import traceback
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from eval.baseline import extract_baseline_tables, extract_baseline_text
-from eval.md_parser import parse_page
-from eval.report import (
-    aggregate_pdf,
-    evaluate_page,
-    write_bad_cases,
-    write_pdf_report,
-    write_summary,
-)
+from eval.baseline import extract_baseline_text
+from eval.md_parser import read_page_md, strip_markdown
+from eval.normalize import normalize_text
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
+logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("eval")
 
+# 首次用脚本测得的基线（2026-04-17）。后续改 pdf2md 对比这个，Δ < 0 = 退步。
+# 昆山峰瑞：字体乱码，PyMuPDF 基线是乱码字符，召回比 >1 是因为 vision 修复后字符变多
+# 广州越秀：扫描件，无 PyMuPDF 基线 → None
+RECALL_BASELINE: dict[str, float | None] = {
+    "天津真格": 1.101,
+    "昆山峰瑞": 1.028,
+    "广州越秀": None,
+    "苏州济峰": 0.994,
+    "IDG": 0.999,
+}
 
-def _load_manifest(md_dir: Path) -> dict[str, Any]:
-    mpath = md_dir / "manifest.json"
-    if not mpath.exists():
-        return {}
-    try:
-        return json.loads(mpath.read_text(encoding="utf-8"))
-    except Exception as e:  # noqa: BLE001
-        logger.warning("manifest.json unreadable in %s: %s", md_dir, e)
-        return {}
+# 字段级准确率基线（2026-04-17）。金标从 eval/golden.yaml 读取——
+# 昆山峰瑞 / 广州越秀的 golden 目前是空，需用户人眼看 PDF 手填后才会有数字。
+ACCURACY_BASELINE: dict[str, float | None] = {
+    "天津真格": 1.00,
+    "昆山峰瑞": None,
+    "广州越秀": None,
+    "苏州济峰": 1.00,
+    "IDG": 1.00,
+}
 
 
-def _method_for_page(manifest: dict[str, Any], page_num: int) -> str:
-    for p in manifest.get("pages", []):
-        if p.get("page_number") == page_num:
-            return p.get("method", "")
-    return ""
+# ──────────────────────────── 召回率 ────────────────────────────
 
 
-def evaluate_pdf(item: dict[str, Any]) -> dict[str, Any]:
-    """评估一份 PDF，返回 {name, lang, agg, pages}。"""
-    name = item["name"]
-    pdf = Path(item["pdf"])
-    md_dir = Path(item["md_dir"])
-    lang = item.get("lang", "zh")
-    logger.info("Evaluating %s (lang=%s)", name, lang)
-
-    baseline_texts = extract_baseline_text(pdf)
-    baseline_tables = extract_baseline_tables(pdf)
-    total_pages = max(len(baseline_texts), len(baseline_tables))
-
-    manifest = _load_manifest(md_dir)
-    pages: list[dict[str, Any]] = []
-    for i in range(total_pages):
-        page_num = i + 1
-        b_text = baseline_texts[i] if i < len(baseline_texts) else ""
-        b_tables = baseline_tables[i] if i < len(baseline_tables) else []
-        parsed = parse_page(md_dir, page_num)
-        if parsed is None:
-            pages.append({
-                "page": page_num,
-                "status": "page_missing",
-                "baseline_text_len": len(b_text),
-                "md_text_len": 0,
-                "text": {"skipped": True, "reason": "page_missing"},
-                "text_edit_ratio": None,
-                "baseline_tables": len(b_tables),
-                "md_tables": 0,
-                "table": {"skipped": True, "reason": "page_missing"},
-                "md_method": _method_for_page(manifest, page_num),
-            })
+def recall_of_pdf(pdf_path: Path, md_dir: Path) -> tuple[float | None, int, int]:
+    """返回 (recall, md_char_len, baseline_char_len)。baseline=0 → recall=None。"""
+    base_pages = extract_baseline_text(pdf_path)
+    baseline_len = sum(len(t) for t in base_pages)
+    md_len = 0
+    for i in range(len(base_pages)):
+        raw = read_page_md(md_dir, i + 1)
+        if raw is None:
             continue
-        md_text, md_tables = parsed
-        page_result = evaluate_page(
-            baseline_text=b_text,
-            md_text=md_text,
-            baseline_tables=b_tables,
-            md_tables=md_tables,
-            lang=lang,
-        )
-        page_result["page"] = page_num
-        page_result["md_method"] = _method_for_page(manifest, page_num)
-        page_result["_baseline_text"] = b_text
-        page_result["_md_text"] = md_text
-        page_result["_baseline_tables"] = b_tables
-        page_result["_md_tables"] = md_tables
-        pages.append(page_result)
-
-    agg = aggregate_pdf(pages, lang=lang)
-    logger.info(
-        "  %s: pages=%d scanned=%d text_F1=%.3f table_F1=%.3f",
-        name, agg["pages_total"], agg["pages_scanned"], agg["text_F1"], agg["table_F1"],
-    )
-    return {"name": name, "lang": lang, "agg": agg, "pages": pages}
+        md_len += len(strip_markdown(raw))
+    if baseline_len == 0:
+        return None, md_len, 0
+    return md_len / baseline_len, md_len, baseline_len
 
 
-def run_evaluation(items: list[dict[str, Any]], output_dir: Path) -> list[dict[str, Any]]:
-    """主流程：逐份评估，产出所有报告文件。某份挂掉不影响其他。"""
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    results: list[dict[str, Any]] = []
-    for item in items:
-        try:
-            result = evaluate_pdf(item)
-            write_pdf_report(result, output_dir)
-            write_bad_cases(result, output_dir)
-            results.append(result)
-        except Exception as e:  # noqa: BLE001
-            logger.error("FAILED %s: %s", item.get("name"), e)
-            logger.error(traceback.format_exc())
-            results.append({
-                "name": item.get("name", "unknown"),
-                "lang": item.get("lang", "zh"),
-                "agg": {
-                    "lang": item.get("lang", "zh"),
-                    "pages_total": 0, "pages_scanned": 0,
-                    "pages_table_missing": 0, "pages_missing": 0,
-                    "text_P": 0.0, "text_R": 0.0, "text_F1": 0.0,
-                    "text_edit_ratio": 0.0,
-                    "table_P": 0.0, "table_R": 0.0, "table_F1": 0.0,
-                    "tables_total": 0, "tables_matched": 0,
-                    "text_P_word": None, "text_R_word": None, "text_F1_word": None,
-                    "_failed": str(e),
-                },
-                "pages": [],
-            })
-    write_summary(results, output_dir)
-    return results
+# ──────────────────────────── 准确率（字段级） ────────────────────────────
+
+
+@dataclass
+class FieldCheck:
+    field: str
+    expected: str
+    hit: bool
+
+
+def _load_md_whole(md_dir: Path, total_pages: int) -> str:
+    """把所有 pages/*.md 拼接起来做一次归一化。字段匹配就在这个大字符串上找。"""
+    parts: list[str] = []
+    for i in range(total_pages):
+        raw = read_page_md(md_dir, i + 1)
+        if raw is None:
+            continue
+        parts.append(strip_markdown(raw))
+    return " ".join(parts)
+
+
+def check_fields(md_whole_normalized: str, fields: dict[str, str]) -> list[FieldCheck]:
+    """对每个 (字段名, 期望值)，归一化期望值后在 MD 里做 substring 查找。
+
+    跳过占位符（形如 "<填...>"）——这些是模板里的默认值，没真标过。
+    """
+    checks: list[FieldCheck] = []
+    for field, expected in fields.items():
+        if not expected or expected.startswith("<填"):
+            continue
+        needle = normalize_text(str(expected))
+        if not needle:
+            continue
+        checks.append(FieldCheck(
+            field=field,
+            expected=str(expected),
+            hit=needle in md_whole_normalized,
+        ))
+    return checks
+
+
+def accuracy_of_pdf(
+    md_dir: Path,
+    total_pages: int,
+    fields: dict[str, str],
+) -> tuple[float | None, list[FieldCheck]]:
+    """返回 (accuracy, checks)。若没有有效字段（全是 <填...> 占位），accuracy=None。"""
+    md_whole = _load_md_whole(md_dir, total_pages)
+    checks = check_fields(md_whole, fields)
+    if not checks:
+        return None, []
+    hits = sum(1 for c in checks if c.hit)
+    return hits / len(checks), checks
+
+
+# ──────────────────────────── 入口 ────────────────────────────
+
+
+def _fmt_pct(x: float | None) -> str:
+    return "—" if x is None else f"{x * 100:.1f}%"
+
+
+def _delta_str(current: float | None, baseline: float | None) -> str:
+    if current is None or baseline is None:
+        return "(无基线)"
+    delta_pp = (current - baseline) * 100
+    arrow = "↑" if delta_pp > 0.5 else "↓" if delta_pp < -0.5 else "="
+    sign = "+" if delta_pp >= 0 else ""
+    return f"{sign}{delta_pp:5.1f}pp {arrow}"
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="pdf2md 转换质量评估")
+    parser = argparse.ArgumentParser(description="pdf2md 召回率 + 准确率评估")
     parser.add_argument("--config", default="eval/config.yaml")
+    parser.add_argument("--golden", default="eval/golden.yaml")
     args = parser.parse_args(argv)
 
     cfg_path = Path(args.config)
     if not cfg_path.exists():
-        logger.error("Config not found: %s", cfg_path)
+        print(f"ERROR: config not found: {cfg_path}", file=sys.stderr)
         return 2
     cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-    items = cfg.get("items", [])
-    output_dir = Path(cfg.get("output_dir", "eval_output"))
-    missing = []
-    for it in items:
-        if not Path(it["pdf"]).exists():
-            missing.append(f"PDF missing: {it['pdf']}")
-        if not Path(it["md_dir"]).exists():
-            missing.append(f"md_dir missing: {it['md_dir']}")
-    if missing:
-        logger.error("Fail-fast: config references missing paths:\n%s", "\n".join(missing))
-        return 3
+    items: list[dict[str, Any]] = cfg.get("items", [])
 
-    run_evaluation(items, output_dir)
-    logger.info("Done. Reports at %s", output_dir.resolve())
+    # golden 可选：没有就只跑召回
+    golden_path = Path(args.golden)
+    golden_by_name: dict[str, dict[str, str]] = {}
+    if golden_path.exists():
+        gdoc = yaml.safe_load(golden_path.read_text(encoding="utf-8")) or {}
+        for g in gdoc.get("items", []):
+            golden_by_name[g["name"]] = g.get("fields", {}) or {}
+    else:
+        print(f"提示：{golden_path} 不存在，只跑召回率。复制 golden.yaml.example 填入标注即可启用准确率。")
+
+    # ── 主表 ──
+    print()
+    print(
+        f"{'PDF':<12s}  {'召回':>8s}  {'召回基线':>10s}  {'Δ召回':>12s}  "
+        f"{'准确':>8s}  {'准确基线':>10s}  {'Δ准确':>12s}  {'字段':>6s}"
+    )
+    print("─" * 100)
+    miss_report: list[tuple[str, list[FieldCheck]]] = []
+
+    for it in items:
+        name = it["name"]
+        pdf = Path(it["pdf"])
+        md_dir = Path(it["md_dir"])
+        if not pdf.exists():
+            print(f"{name:<12s}  (PDF 不存在：{pdf})")
+            continue
+        if not md_dir.exists():
+            print(f"{name:<12s}  (MD 目录不存在：{md_dir})")
+            continue
+
+        try:
+            recall, md_len, base_len = recall_of_pdf(pdf, md_dir)
+        except Exception as e:  # noqa: BLE001
+            print(f"{name:<12s}  FAILED: {e}")
+            continue
+
+        # 准确率
+        acc: float | None = None
+        checks: list[FieldCheck] = []
+        fields = golden_by_name.get(name, {})
+        if fields:
+            # total_pages 取 PDF 页数
+            import fitz
+            with fitz.open(pdf) as doc:
+                total_pages = len(doc)
+            acc, checks = accuracy_of_pdf(md_dir, total_pages, fields)
+            if checks and not all(c.hit for c in checks):
+                miss_report.append((name, [c for c in checks if not c.hit]))
+
+        recall_baseline = RECALL_BASELINE.get(name)
+        acc_baseline = ACCURACY_BASELINE.get(name)
+        n_fields = len(checks)
+        print(
+            f"{name:<12s}  "
+            f"{_fmt_pct(recall):>8s}  {_fmt_pct(recall_baseline):>10s}  {_delta_str(recall, recall_baseline):>12s}  "
+            f"{_fmt_pct(acc):>8s}  {_fmt_pct(acc_baseline):>10s}  {_delta_str(acc, acc_baseline):>12s}  "
+            f"{n_fields:>6d}"
+        )
+
+    # ── 准确率命中详情（只列未命中的字段）──
+    if miss_report:
+        print()
+        print("未命中字段（MD 里没找到期望值）：")
+        for name, misses in miss_report:
+            print(f"  [{name}]")
+            for c in misses:
+                print(f"    ✗ {c.field}: 期望包含 {c.expected!r}")
+
+    print()
+    print("提示：字段级准确率是基于 golden.yaml 的人工标注，覆盖你肉眼最关心的 15-25 个字段；")
+    print("      召回率是字符长度比，作为整体完整性的代理信号。")
     return 0
 
 
