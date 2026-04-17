@@ -43,3 +43,68 @@ def pair_metrics(md: Table, baseline: Table) -> dict[str, Any]:
     result["fp"] = fp
     result["fn"] = fn
     return result
+
+
+JACCARD_THRESHOLD = 0.1
+
+
+def _jaccard(a: Table, b: Table) -> float:
+    sa = set(cell_multiset(a).keys())
+    sb = set(cell_multiset(b).keys())
+    if not sa and not sb:
+        return 0.0
+    inter = len(sa & sb)
+    union = len(sa | sb)
+    return inter / union if union > 0 else 0.0
+
+
+def page_table_metrics(
+    md_tables: list[Table],
+    baseline_tables: list[Table],
+) -> dict[str, Any]:
+    """页级表格指标：贪心配对 + TP/FP/FN 累加。"""
+    if not baseline_tables and not md_tables:
+        return {"skipped": True, "reason": "no_tables"}
+    if not baseline_tables:
+        return {"skipped": True, "reason": "baseline_missing"}
+
+    candidates: list[tuple[int, int, float]] = []
+    for i, t_md in enumerate(md_tables):
+        for j, t_base in enumerate(baseline_tables):
+            s = _jaccard(t_md, t_base)
+            if s >= JACCARD_THRESHOLD:
+                candidates.append((i, j, s))
+    candidates.sort(key=lambda x: x[2], reverse=True)
+
+    used_md: set[int] = set()
+    used_base: set[int] = set()
+    pairs: list[tuple[int, int]] = []
+    for i, j, _ in candidates:
+        if i in used_md or j in used_base:
+            continue
+        pairs.append((i, j))
+        used_md.add(i)
+        used_base.add(j)
+
+    tp = fp = fn = 0
+    for i, j in pairs:
+        r = pair_metrics(md_tables[i], baseline_tables[j])
+        tp += r["tp"]
+        fp += r["fp"]
+        fn += r["fn"]
+
+    for i, t in enumerate(md_tables):
+        if i not in used_md:
+            fp += sum(cell_multiset(t).values())
+    for j, t in enumerate(baseline_tables):
+        if j not in used_base:
+            fn += sum(cell_multiset(t).values())
+
+    result = _prf_from_counts(tp, fp, fn)
+    result["tp"] = tp
+    result["fp"] = fp
+    result["fn"] = fn
+    result["tables_matched"] = len(pairs)
+    result["tables_total_baseline"] = len(baseline_tables)
+    result["skipped"] = False
+    return result
