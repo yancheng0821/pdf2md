@@ -10,3 +10,5 @@ test_output/
 dist/
 build/
 .pytest_cache/
+eval_output/
+eval/config.yaml

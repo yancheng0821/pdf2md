@@ -1,0 +1,32 @@
+# eval/config.yaml.example
+# 复制为 config.yaml（不入库）后按实际路径填写
+#
+# 每份 PDF 一个条目：
+#   name: 用于报告标题，也是 eval_output 子目录名
+#   pdf:  源 PDF 绝对路径
+#   md_dir: pdf2md 产物目录（包含 canonical.md, pages/, manifest.json）
+#   lang: zh 或 en
+
+items:
+  - name: "天津真格"
+    pdf: "/Users/aisenyc/Desktop/归档/【2024 年报】天津真格天弘资产管理合伙企业（有限合伙）2024年年报_三亚奥美信达投资中心（有限合伙）.pdf"
+    md_dir: "/Users/aisenyc/Desktop/归档/output/【2024 年报】天津真格天弘资产管理合伙企业（有限合伙）2024年年报_三亚奥美信达投资中心（有限合伙）"
+    lang: "zh"
+  - name: "昆山峰瑞"
+    pdf: "/Users/aisenyc/Desktop/归档/昆山峰瑞24年度投资报告.pdf"
+    md_dir: "/Users/aisenyc/Desktop/归档/output/昆山峰瑞24年度投资报告"
+    lang: "zh"
+  - name: "广州越秀"
+    pdf: "/Users/aisenyc/Desktop/归档/广州越秀.pdf"
+    md_dir: "/Users/aisenyc/Desktop/归档/output/广州越秀"
+    lang: "zh"
+  - name: "苏州济峰"
+    pdf: "/Users/aisenyc/Desktop/归档/【2024 年报】苏州济峰基金2024年度报告_Final.pdf"
+    md_dir: "/Users/aisenyc/Desktop/归档/output/【2024 年报】苏州济峰基金2024年度报告_Final"
+    lang: "zh"
+  - name: "IDG"
+    pdf: "/Users/aisenyc/Desktop/归档/【2024 年报】IDG China Capital Fund III LP_Annual Report_December 31, 2024 纯英文报告.pdf"
+    md_dir: "/Users/aisenyc/Desktop/归档/output/【2024 年报】IDG China Capital Fund III LP_Annual Report_December 31, 2024 纯英文报告"
+    lang: "en"
+
+output_dir: "eval_output"
